@@ -119,7 +119,7 @@ class HereMap {
     fenceRequest(layerIds, position) { }
 }
 ```
-***********************************************************************************************
+
 You can see we have a `HereMap` class with several functions, including a constructor method. Most 
 of the heavy lifting will be accomplished in this class.
 
@@ -149,3 +149,223 @@ constructor(appId, appCode, mapElement) {
 }
 ```
 
+In the above constructor method, we are accepting an `appId`, an `appCode`, and a `mapElement` 
+from the HTML file. Using the token information we can initialize the HERE platform and using the 
+HERE platform along with the element information we can display the map. The app id and app code 
+tokens can be found in the HERE Developer Portal.
+
+In addition to displaying the map, we are also making it interactive with pan and zoom controls. 
+We are initializing the geofencing service and dropping a marker on the map. This marker will 
+eventually move around.
+
+With the basics of the project done, open the `index.html` file and include the following in the 
+`<script>` tag:
+
+```html
+<script>
+    const start = async () => {
+        const map = new HereMap("APP-ID-HERE", "APP-CODE-HERE", document.getElementById("map"));
+    };
+    start();
+</script>
+```
+
+Assuming you're using valid project tokens, the map should show on the screen with a marker 
+nearby. This is where things are going to start to get interesting.
+
+## Creating and Uploading Geofence WKT Data to HERE
+
+In a realistic scenario, you're going to want to create your geofence, possibly render it on the 
+screen, and upload it to HERE, all without leaving your core project. We also don't want to 
+generate WKT files by hand.
+
+There is a solution!
+
+We can actually create any shape we want using the HERE JavaScript SDK, and as part of the SDK we 
+can convert those shapes to WKT strings.
+
+Within the index.html file, add the following to your `<script>` tag:
+    
+```html
+<script>
+    const start = async () => {
+        const map = new HereMap("APP-ID-HERE", "APP-CODE-HERE", document.getElementById("map"));
+        const lineString = new H.geo.LineString();
+        lineString.pushPoint({ lat: 37, lng: -121 });
+        lineString.pushPoint({ lat: 37.2, lng: -121.002 });
+        lineString.pushPoint({ lat: 37.2, lng: -121.2 });
+        lineString.pushPoint({ lat: 37, lng: -121 });
+        const polygon = new H.map.Polygon(lineString);
+    };
+    start();
+</script>
+```
+
+Using the above code, we can create a `LineString` which can be used to create a `Polygon` shape. 
+To convert the shape into WKT, we can create a function in our `heremap.js` file:
+
+```javascript
+polygonToWKT(polygon) {
+    const geometry = polygon.getGeometry();
+    return geometry.toString();
+}
+```
+
+If we were to pass our polygon to this function, we would be returned the WKT formatted geometry 
+information. Since it is also nice to draw this shape, we could also create a draw function in 
+the `heremap.js` file:
+
+```javascript
+draw(mapObject) {
+    this.map.addObject(mapObject);
+}
+```
+
+You could move everything into the JavaScript file or everything into the HTML file, it doesn't matter.
+
+With the `polygonToWKT` and `draw` functions available, we can do the following from the `index.html` file:
+
+```javascript
+<script>
+    const start = async () => {
+        const map = new HereMap("APP-ID-HERE", "APP-CODE-HERE", document.getElementById("map"));
+        const lineString = new H.geo.LineString();
+        lineString.pushPoint({ lat: 37, lng: -121 });
+        lineString.pushPoint({ lat: 37.2, lng: -121.002 });
+        lineString.pushPoint({ lat: 37.2, lng: -121.2 });
+        lineString.pushPoint({ lat: 37, lng: -121 });
+        const polygon = new H.map.Polygon(lineString);
+        console.log(map.polygonToWKT(polygon));
+        map.draw(polygon);
+    };
+    start();
+</script>
+```
+
+So we have the WKT information for our shape which should also be visible on our map. Now we 
+need to upload that information to the HERE server.
+
+In the project's `heremap.js` file, include the following ^uploadGeofence` function:
+
+```javascript
+uploadGeofence(layerId, name, geometry) {
+    const zip = new JSZip();
+    zip.file("data.wkt", "NAME\tWKT\n" + name + "\t" + geometry);
+    return zip.generateAsync({ type:"blob" }).then(content => {
+        var formData = new FormData();
+        formData.append("zipfile", content);
+        return axios.post("https://gfe.api.here.com/2/layers/upload.json", formData, {
+            headers: {
+                "content-type": "multipart/form-data"
+            },
+            params: {
+                "app_id": this.appId,
+                "app_code": this.appCode,
+                "layer_id": layerId
+            }
+        });
+    });
+}
+```
+
+This is probably our most complicated bit of code. We are accepting a `layerId` which can be 
+thought of as a WKT id, a name, which can be thought of a geofence name, and the geometry.
+
+The geofence name could be something like GameStop or an actual name representation for the fence. 
+Remember, you can have multiple geofences as part of a WKT file, however, ours will only have one.
+
+Using JSZip, we can save our WKT information to a file and add it as a file to the ZIP archive. 
+When we want to officially generate the ZIP archive, we can make it a BLOB so we can do an HTTP 
+request when it is done.
+
+Using axios, we can take our form data which contains the file and issue an HTTP request to the 
+HERE REST API. If all goes smooth, a simple 200 response should be returned.
+
+Going back to the `index.html` file, the following can be added:
+
+
+```html
+<script>
+    const start = async () => {
+        const map = new HereMap("APP-ID-HERE", "APP-CODE-HERE", document.getElementById("map"));
+        const lineString = new H.geo.LineString();
+        lineString.pushPoint({ lat: 37, lng: -121 });
+        lineString.pushPoint({ lat: 37.2, lng: -121.002 });
+        lineString.pushPoint({ lat: 37.2, lng: -121.2 });
+        lineString.pushPoint({ lat: 37, lng: -121 });
+        const polygon = new H.map.Polygon(lineString);
+        console.log(map.polygonToWKT(polygon));
+        map.draw(polygon);
+        const geofenceResponse = await map.uploadGeofence("1234", "Nic Secret Layer", map.polygonToWKT(polygon));
+    };
+    start();
+</script>
+```
+
+You can see that I've given a random id for the layer, provided a name for my geofence, and 
+provided the geometry information for my polygon.
+
+As of right now, we should have an application that creates geofences but doesn't make use of 
+them.
+
+## Checking if a Position Is Within a Geofence
+
+The next step is to see if any given position is within a geofence. To do this, we'll need to 
+provide a layer to check as well as a position. Remember, a layer can have more than one geofence 
+which is useful if you have a lot of data that you need to check.
+
+In the `heremap.js` file, include the following function:
+
+```javascript
+fenceRequest(layerIds, position) {
+    return new Promise((resolve, reject) => {
+        this.geofencing.request(
+            H.service.extension.geofencing.Service.EntryPoint.SEARCH_PROXIMITY,
+            {
+                'layer_ids': layerIds,
+                'proximity': position.lat + "," + position.lng,
+                'key_attributes': ['NAME']
+            },
+            result => {
+                resolve(result);
+            }, error => {
+                reject(error);
+            }
+        );
+    });
+}
+```
+
+Given an array of layer ids and a position, we can make a geofence request to see if we're in 
+the geofence. Not too difficult in comparison to what we've already accomplished.
+
+To see this `fenceRequest` function in action, let's make some changes to the `constructor` method. 
+After creating a marker, add the following:
+
+```javascript
+this.map.addEventListener("tap", (ev) => {
+    var target = ev.target;
+    this.map.removeObject(this.currentPosition);
+    this.currentPosition = new H.map.Marker(this.map.screenToGeo(ev.currentPointer.viewportX, ev.currentPointer.viewportY));
+    this.map.addObject(this.currentPosition);
+    this.fenceRequest(["1234"], this.currentPosition.getPosition()).then(result => {
+        if(result.geometries.length > 0) {
+            alert("You are within a geofence!")
+        } else {
+            console.log("Not within a geofence!");
+        }
+    });
+}, false);
+```
+
+What we're doing in the above code is we're setting up a listener for tap events on the map. 
+If the user taps on the map, we are converting the screen location to geolocation. Using that 
+geolocation we can reset the marker and call the `fenceRequest` function. If we get a result, 
+we are within the geofence. In the result, you'll have specific information towards which 
+geofence was triggered.
+
+This is useful if you need to create geofences for numerous locations based on complex shapes. 
+
+<!--
+***********************************************************************************************
+-->
